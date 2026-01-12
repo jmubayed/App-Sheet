@@ -1,0 +1,1 @@
+Run npx playwright install to install playwright.exe
