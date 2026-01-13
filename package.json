@@ -5,16 +5,20 @@
   "scripts": {
     "test": "playwright test",
     "test:debug": "playwright test --debug",
-    "report": "playwright show-report"
+    "report": "playwright show-report",
+    "select-dates": "ts-node utils/dateSelector.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "@playwright/test": "^1.57.0"
+    "@playwright/test": "^1.57.0",
+    "@types/node": "^22.10.5",
+    "ts-node": "^10.9.2"
   },
   "dependencies": {
+    "date-holidays": "^3.26.6",
     "dotenv": "^17.2.3"
   }
 }
