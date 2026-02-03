@@ -149,6 +149,7 @@ export class DateSelector {
     console.log("  n           - Next month");
     console.log("  p           - Previous month");
     console.log("  week        - Select all weekdays in current week");
+    console.log("  pweek       - Select all weekdays in previous week");
     console.log("  clear       - Clear all selections");
     console.log("  validate    - Check for holidays/weekends in selections");
     console.log("  location    - Change location for holiday detection");
@@ -184,7 +185,7 @@ export class DateSelector {
     const today = new Date();
     const dayOfWeek = today.getDay();
     const monday = new Date(today);
-    
+
     // Calculate days to subtract to get to Monday
     const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
     monday.setDate(today.getDate() - diffToMonday);
@@ -193,12 +194,44 @@ export class DateSelector {
     for (let i = 0; i < 5; i++) {
       const date = new Date(monday);
       date.setDate(monday.getDate() + i);
-      
+
       const formatted = this.formatDate(date);
       const exists = this.selectedDates.some(
         (d) => this.formatDate(d) === formatted
       );
-      
+
+      if (!exists) {
+        this.selectedDates.push(date);
+      }
+    }
+
+    // Update current month view to show the selected week
+    this.currentMonth = new Date(monday);
+    this.currentMonth.setDate(1);
+  }
+
+  private selectPreviousWeekdays(): void {
+    const today = new Date();
+    const dayOfWeek = today.getDay();
+    const monday = new Date(today);
+
+    // Calculate days to subtract to get to Monday of current week
+    const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    monday.setDate(today.getDate() - diffToMonday);
+
+    // Go back one week to get Monday of previous week
+    monday.setDate(monday.getDate() - 7);
+
+    // Select Mon-Fri of previous week
+    for (let i = 0; i < 5; i++) {
+      const date = new Date(monday);
+      date.setDate(monday.getDate() + i);
+
+      const formatted = this.formatDate(date);
+      const exists = this.selectedDates.some(
+        (d) => this.formatDate(d) === formatted
+      );
+
       if (!exists) {
         this.selectedDates.push(date);
       }
@@ -362,6 +395,9 @@ export class DateSelector {
           resolve(this.prompt());
         } else if (input === "week") {
           this.selectCurrentWeekdays();
+          resolve(this.prompt());
+        } else if (input === "pweek") {
+          this.selectPreviousWeekdays();
           resolve(this.prompt());
         } else if (input === "clear") {
           this.selectedDates = [];
