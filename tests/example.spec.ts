@@ -15,30 +15,60 @@ function getSelectedWorkingDays(): string[] {
   return dates;
 }
 
-function normalizeDate(dateStr: string): string {
+function detectConfigDateFormat(dateStr: string): "DD/MM/YYYY" | "MM/DD/YYYY" {
   const parts = dateStr.split("/").map(Number);
-  const [first, second, year] = parts;
+  const [first, second] = parts;
 
-  let day: number, month: number;
-
+  // If first > 12, must be DD/MM/YYYY
   if (first > 12) {
-    // First part > 12, must be day (DD/MM/YYYY)
-    day = first;
-    month = second;
-  } else if (second > 12) {
-    // Second part > 12, must be day (MM/DD/YYYY)
-    month = first;
-    day = second;
-  } else {
-    // Both <= 12, ambiguous - default to DD/MM/YYYY
-    day = first;
-    month = second;
+    return "DD/MM/YYYY";
   }
-
-  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  // If second > 12, must be MM/DD/YYYY
+  if (second > 12) {
+    return "MM/DD/YYYY";
+  }
+  // Ambiguous - default to DD/MM/YYYY (your config uses this)
+  return "DD/MM/YYYY";
 }
 
-function parseTimeTo24Hour(timeStr: string): { hours: number; minutes: number; seconds: number } {
+function convertDateFormat(
+  dateStr: string,
+  fromFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+  toFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+): string {
+  const parts = dateStr.split("/");
+  const [first, second, year] = parts;
+
+  let day: string, month: string;
+
+  // Parse based on source format
+  if (fromFormat === "DD/MM/YYYY") {
+    day = first;
+    month = second;
+  } else {
+    month = first;
+    day = second;
+  }
+
+  // Format based on target format
+  if (toFormat === "DD/MM/YYYY") {
+    return `${day}/${month}/${year}`;
+  } else {
+    return `${month}/${day}/${year}`;
+  }
+}
+
+function normalizeDateForComparison(dateStr: string): string {
+  // Remove leading zeros for comparison: 01/26/2026 -> 1/26/2026
+  const parts = dateStr.split("/");
+  return parts.map((p) => String(parseInt(p))).join("/");
+}
+
+function parseTimeTo24Hour(timeStr: string): {
+  hours: number;
+  minutes: number;
+  seconds: number;
+} {
   const cleaned = timeStr.trim().toUpperCase();
 
   const isPM = cleaned.includes("PM");
@@ -62,41 +92,151 @@ function parseTimeTo24Hour(timeStr: string): { hours: number; minutes: number; s
   return { hours, minutes, seconds };
 }
 
-function formatTimeTo12Hour(hours: number, minutes: number, seconds: number): string {
+function formatTimeTo12Hour(
+  hours: number,
+  minutes: number,
+  seconds: number,
+): string {
   const period = hours >= 12 ? "PM" : "AM";
   let displayHours = hours % 12;
   if (displayHours === 0) displayHours = 12;
   return `${String(displayHours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}${period}`;
 }
 
-function formatTimeTo24Hour(hours: number, minutes: number, seconds: number): string {
+function formatTimeTo24Hour(
+  hours: number,
+  minutes: number,
+  seconds: number,
+): string {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
-async function detectTimeFormat(page: Page): Promise<"12" | "24"> {
-  // Check existing time displays in the UI
-  const timeDisplays = page.locator('//span[contains(@data-testid, "time")]');
+async function detectTimeFormat(
+  page: Page,
+  sectionName: string,
+): Promise<"12" | "24"> {
+  // Use different xpath based on section
+  let timeDisplays;
+
+  if (sectionName === "TIMESHEET") {
+    timeDisplays = page.locator(
+      '//span[@data-testid="table-view-row"]//div[@data-testonly-column="Clock out_Shift_1"]',
+    );
+  } else {
+    // For TIMEALLOCATIONS
+    timeDisplays = page.locator(
+      '//span[@data-testid="table-view-row"]//div[contains(@class, "TimeTypeDisplay")]',
+    );
+  }
+
+  // Wait for time displays to be visible
+  try {
+    await timeDisplays.first().waitFor({ state: "visible", timeout: 5000 });
+  } catch (e) {
+    console.warn(
+      `No time displays found for ${sectionName}, defaulting to 24-hour format`,
+    );
+    return "24";
+  }
+
   const count = await timeDisplays.count();
 
   if (count > 0) {
-    const timeText = await timeDisplays.first().textContent();
+    // Check the first 5 time displays (or fewer if less than 5 exist)
+    const limit = Math.min(count, 5);
+
+    for (let i = 0; i < limit; i++) {
+      const timeText = await timeDisplays.nth(i).textContent();
+      if (timeText && /AM|PM/i.test(timeText)) {
+        return "12";
+      }
+    }
+
+    // If we checked times and none had AM/PM, it's 24-hour format
+    return "24";
+  }
+
+  // Fallback: check existing time displays
+  const fallbackTimeDisplays = page.locator(
+    '//span[contains(@data-testid, "time")]',
+  );
+  const timeCount = await fallbackTimeDisplays.count();
+
+  if (timeCount > 0) {
+    const timeText = await fallbackTimeDisplays.first().textContent();
     if (timeText && /AM|PM/i.test(timeText)) {
       return "12";
     }
     return "24";
   }
 
-  // Fallback: check placeholder or existing value of time input
-  const timeInput = page.locator('//input[@type="time"]').first();
-  if (await timeInput.count() > 0) {
-    const placeholder = await timeInput.getAttribute("placeholder");
-    if (placeholder && /AM|PM/i.test(placeholder)) {
-      return "12";
+  // Default to 24-hour format
+  return "24";
+}
+
+async function detectDateFormat(
+  page: Page,
+): Promise<"DD/MM/YYYY" | "MM/DD/YYYY"> {
+  // Check date format from table rows
+  const tableRows = page.locator('//span[@data-testid="table-view-row"]');
+
+  // Wait for table rows to be visible
+  try {
+    await tableRows.first().waitFor({ state: "visible", timeout: 5000 });
+  } catch (e) {
+    console.warn("No table rows found, defaulting to MM/DD/YYYY format");
+    return "MM/DD/YYYY";
+  }
+
+  const count = await tableRows.count();
+
+  if (count > 0) {
+    // Get text content and look for date patterns
+    const rowText = await tableRows.first().textContent();
+
+    // Look for date pattern like XX/XX/XXXX
+    const dateMatch = rowText?.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+
+    if (dateMatch) {
+      const first = parseInt(dateMatch[1]);
+      const second = parseInt(dateMatch[2]);
+
+      // If first number > 12, it must be DD/MM/YYYY
+      if (first > 12) {
+        return "DD/MM/YYYY";
+      }
+      // If second number > 12, it must be MM/DD/YYYY
+      if (second > 12) {
+        return "MM/DD/YYYY";
+      }
     }
   }
 
-  // Default to 24-hour format
-  return "24";
+  // Check date displays
+  const dateCells = page.locator(
+    '//span[@data-testid="date-type-display-span"]',
+  );
+  const dateCount = await dateCells.count();
+
+  if (dateCount > 0) {
+    const dateText = await dateCells.first().textContent();
+    const dateMatch = dateText?.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+
+    if (dateMatch) {
+      const first = parseInt(dateMatch[1]);
+      const second = parseInt(dateMatch[2]);
+
+      if (first > 12) {
+        return "DD/MM/YYYY";
+      }
+      if (second > 12) {
+        return "MM/DD/YYYY";
+      }
+    }
+  }
+
+  // Default to MM/DD/YYYY (US format)
+  return "MM/DD/YYYY";
 }
 
 function formatTime(timeStr: string, format: "12" | "24"): string {
@@ -111,7 +251,7 @@ function formatTime(timeStr: string, format: "12" | "24"): string {
 async function fillInputWithKeyboard(
   page: Page,
   selector: string,
-  value: string
+  value: string,
 ) {
   await page.locator(selector).click();
   await page.keyboard.type(value);
@@ -124,79 +264,113 @@ async function openSection(page: Page, sectionName: string) {
 
 async function entryExistsForDate(
   page: Page,
-  dateStr: string
+  dateStr: string,
+  configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+  pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
 ): Promise<boolean> {
-  const target = normalizeDate(dateStr);
+  // Convert config date to page format for comparison
+  const targetDate = convertDateFormat(dateStr, configFormat, pageFormat);
+  const normalizedTarget = normalizeDateForComparison(targetDate);
 
   const dateCells = page.locator(
-    '//span[@data-testid="date-type-display-span"]'
+    '//span[@data-testid="date-type-display-span"]',
   );
 
   await dateCells.first().waitFor({ state: "visible", timeout: 5000 });
 
   const existingDates = await dateCells.allTextContents();
 
-  return existingDates.some((d) => normalizeDate(d.trim()) === target);
+  return existingDates.some((d) => normalizeDateForComparison(d.trim()) === normalizedTarget);
 }
 
 async function addEntryIfMissing(
   page: Page,
   sectionName: string,
   dateStr: string,
-  fillForm: () => Promise<void>
+  fillForm: (
+    timeFormat: "12" | "24",
+    configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+    pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+  ) => Promise<void>,
 ) {
   await openSection(page, sectionName);
 
-  if (await entryExistsForDate(page, dateStr)) {
+  // Wait for table to load properly
+  await page.waitForTimeout(2000);
+
+  // Detect formats after opening the section
+  const timeFormat = await detectTimeFormat(page, sectionName);
+  const pageFormat = await detectDateFormat(page);
+  const configFormat = detectConfigDateFormat(dateStr);
+
+  console.log(
+    `${sectionName} - Detected time format: ${timeFormat}-hour, page date format: ${pageFormat}, config date format: ${configFormat}`,
+  );
+
+  if (await entryExistsForDate(page, dateStr, configFormat, pageFormat)) {
     console.log(`${sectionName} already exists for ${dateStr}`);
     await page.goto(BASE_URL);
     return;
   }
 
   await page.click('//div[contains(text(),"Add")]');
-  await fillForm();
+  await fillForm(timeFormat, configFormat, pageFormat);
   await page.click('//span[contains(text(),"Save")]');
 
   await page.waitForTimeout(1500);
   await page.goto(BASE_URL);
 }
 
-async function fillTimeAllocationsForm(page: Page, dateStr: string, timeFormat: "12" | "24") {
-  await fillInputWithKeyboard(page, '//input[@type="date"]', dateStr);
+async function fillTimeAllocationsForm(
+  page: Page,
+  dateStr: string,
+  timeFormat: "12" | "24",
+  configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+  pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+) {
+  const formattedDate = convertDateFormat(dateStr, configFormat, pageFormat);
+  await fillInputWithKeyboard(page, '//input[@type="date"]', formattedDate);
   await fillInputWithKeyboard(
     page,
     '//input[@aria-label="Project"]',
-    process.env.PROJECT || ""
+    process.env.PROJECT || "",
   );
   await fillInputWithKeyboard(
     page,
     '//input[@type="time"]',
-    formatTime(process.env.TIME_DEDICATED || "", timeFormat)
+    formatTime(process.env.TIME_DEDICATED || "", timeFormat),
   );
 }
 
-async function fillTimesheetForm(page: Page, dateStr: string, timeFormat: "12" | "24") {
-  await fillInputWithKeyboard(page, '//input[@type="date"]', dateStr);
+async function fillTimesheetForm(
+  page: Page,
+  dateStr: string,
+  timeFormat: "12" | "24",
+  configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+  pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+) {
+  const formattedDate = convertDateFormat(dateStr, configFormat, pageFormat);
+  await fillInputWithKeyboard(page, '//input[@type="date"]', formattedDate);
 
   await fillInputWithKeyboard(
     page,
     '(//input[@type="time"])[1]',
-    formatTime(process.env.CLOCK_IN_SHIFT_1 || "", timeFormat)
+    formatTime(process.env.CLOCK_IN_SHIFT_1 || "", timeFormat),
   );
   await fillInputWithKeyboard(
     page,
     '(//input[@type="time"])[2]',
-    formatTime(process.env.CLOCK_OUT_SHIFT_1 || "", timeFormat)
+    formatTime(process.env.CLOCK_OUT_SHIFT_1 || "", timeFormat),
   );
   await fillInputWithKeyboard(
     page,
     '(//input[@type="time"])[3]',
-    formatTime(process.env.CLOCK_IN_SHIFT_2 || "", timeFormat)
+    formatTime(process.env.CLOCK_IN_SHIFT_2 || "", timeFormat),
   );
   await fillInputWithKeyboard(
     page,
     '(//input[@type="time"])[4]',
-    formatTime(process.env.CLOCK_OUT_SHIFT_2 || "", timeFormat)
+    formatTime(process.env.CLOCK_OUT_SHIFT_2 || "", timeFormat),
   );
 }
 
@@ -221,21 +395,31 @@ test("fill timesheet for selected working days", async ({ page }) => {
 
   await page.pause();
 
-  /* -------- DETECT TIME FORMAT FROM UI -------- */
-  const timeFormat = await detectTimeFormat(page);
-  console.log(`Detected time format: ${timeFormat}-hour`);
-
   /* -------- TIMEALLOCATIONS -------- */
   for (const dateStr of workingDays) {
-    await addEntryIfMissing(page, "TIMEALLOCATIONS", dateStr, () =>
-      fillTimeAllocationsForm(page, dateStr, timeFormat)
+    await addEntryIfMissing(
+      page,
+      "TIMEALLOCATIONS",
+      dateStr,
+      (timeFormat, configFormat, pageFormat) =>
+        fillTimeAllocationsForm(
+          page,
+          dateStr,
+          timeFormat,
+          configFormat,
+          pageFormat,
+        ),
     );
   }
 
   /* -------- TIMESHEET -------- */
   for (const dateStr of workingDays) {
-    await addEntryIfMissing(page, "TIMESHEET", dateStr, () =>
-      fillTimesheetForm(page, dateStr, timeFormat)
+    await addEntryIfMissing(
+      page,
+      "TIMESHEET",
+      dateStr,
+      (timeFormat, configFormat, pageFormat) =>
+        fillTimesheetForm(page, dateStr, timeFormat, configFormat, pageFormat),
     );
   }
 });
