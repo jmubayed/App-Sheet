@@ -148,6 +148,7 @@ export class DateSelector {
     console.log("  remove [#]  - Remove specific date from list (e.g., 'remove 1')");
     console.log("  n           - Next month");
     console.log("  p           - Previous month");
+    console.log("  range X-Y   - Select weekdays from day X to Y (e.g., 'range 1-15')");
     console.log("  week        - Select all weekdays in current week");
     console.log("  pweek       - Select all weekdays in previous week");
     console.log("  clear       - Clear all selections");
@@ -208,6 +209,36 @@ export class DateSelector {
     // Update current month view to show the selected week
     this.currentMonth = new Date(monday);
     this.currentMonth.setDate(1);
+  }
+
+  private selectRange(startDay: number, endDay: number): void {
+    const year = this.currentMonth.getFullYear();
+    const month = this.currentMonth.getMonth();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+    if (startDay < 1 || endDay > daysInMonth || startDay > endDay) {
+      console.log(`\n⚠️  Invalid range. Use days between 1 and ${daysInMonth}, e.g., 'range 1-15'`);
+      return;
+    }
+
+    let added = 0;
+    for (let day = startDay; day <= endDay; day++) {
+      const date = new Date(year, month, day);
+
+      if (this.isWeekend(date)) continue;
+
+      const formatted = this.formatDate(date);
+      const exists = this.selectedDates.some(
+        (d) => this.formatDate(d) === formatted
+      );
+
+      if (!exists) {
+        this.selectedDates.push(date);
+        added++;
+      }
+    }
+
+    console.log(`\n✓ Added ${added} weekday(s) from day ${startDay} to ${endDay}`);
   }
 
   private selectPreviousWeekdays(): void {
@@ -393,6 +424,17 @@ export class DateSelector {
         } else if (input === "p") {
           this.currentMonth.setMonth(this.currentMonth.getMonth() - 1);
           resolve(this.prompt());
+        } else if (input.startsWith("range ") || input.startsWith("range")) {
+          const rangeStr = input.replace("range", "").trim();
+          const match = rangeStr.match(/^(\d+)\s*[-–]\s*(\d+)$/);
+          if (match) {
+            const start = parseInt(match[1]);
+            const end = parseInt(match[2]);
+            this.selectRange(start, end);
+          } else {
+            console.log("\n⚠️  Invalid format. Use: range 1-15");
+          }
+          setTimeout(() => resolve(this.prompt()), 1500);
         } else if (input === "week") {
           this.selectCurrentWeekdays();
           resolve(this.prompt());

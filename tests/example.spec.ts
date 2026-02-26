@@ -248,6 +248,28 @@ function formatTime(timeStr: string, format: "12" | "24"): string {
   return formatTimeTo24Hour(hours, minutes, seconds);
 }
 
+async function fillDateInput(page: Page, selector: string, dateStr: string, configFormat: "DD/MM/YYYY" | "MM/DD/YYYY") {
+  // Convert config date to ISO format (YYYY-MM-DD) which is the standard for <input type="date">
+  const parts = dateStr.split("/");
+  let day: string, month: string, year: string;
+
+  if (configFormat === "DD/MM/YYYY") {
+    [day, month, year] = parts;
+  } else {
+    [month, day, year] = parts;
+  }
+
+  const isoDate = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  await page.locator(selector).fill(isoDate);
+}
+
+async function fillTimeInput(page: Page, selector: string, timeStr: string) {
+  // Convert any time format to HH:MM:SS (24h) which is the standard for <input type="time">
+  const { hours, minutes, seconds } = parseTimeTo24Hour(timeStr);
+  const time24 = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  await page.locator(selector).fill(time24);
+}
+
 async function fillInputWithKeyboard(
   page: Page,
   selector: string,
@@ -268,9 +290,15 @@ async function entryExistsForDate(
   configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
   pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
 ): Promise<boolean> {
-  // Convert config date to page format for comparison
-  const targetDate = convertDateFormat(dateStr, configFormat, pageFormat);
-  const normalizedTarget = normalizeDateForComparison(targetDate);
+  // Extract day, month, year from config date
+  const parts = dateStr.split("/").map(Number);
+  let day: number, month: number, year: number;
+
+  if (configFormat === "DD/MM/YYYY") {
+    [day, month, year] = parts;
+  } else {
+    [month, day, year] = parts;
+  }
 
   const dateCells = page.locator(
     '//span[@data-testid="date-type-display-span"]',
@@ -280,7 +308,14 @@ async function entryExistsForDate(
 
   const existingDates = await dateCells.allTextContents();
 
-  return existingDates.some((d) => normalizeDateForComparison(d.trim()) === normalizedTarget);
+  // Check against both possible page formats to handle ambiguous dates
+  const asDDMM = normalizeDateForComparison(`${day}/${month}/${year}`);
+  const asMMDD = normalizeDateForComparison(`${month}/${day}/${year}`);
+
+  return existingDates.some((d) => {
+    const normalized = normalizeDateForComparison(d.trim());
+    return normalized === asDDMM || normalized === asMMDD;
+  });
 }
 
 async function addEntryIfMissing(
@@ -328,18 +363,13 @@ async function fillTimeAllocationsForm(
   configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
   pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
 ) {
-  const formattedDate = convertDateFormat(dateStr, configFormat, pageFormat);
-  await fillInputWithKeyboard(page, '//input[@type="date"]', formattedDate);
+  await fillDateInput(page, '//input[@type="date"]', dateStr, configFormat);
   await fillInputWithKeyboard(
     page,
     '//input[@aria-label="Project"]',
     process.env.PROJECT || "",
   );
-  await fillInputWithKeyboard(
-    page,
-    '//input[@type="time"]',
-    formatTime(process.env.TIME_DEDICATED || "", timeFormat),
-  );
+  await fillTimeInput(page, '//input[@type="time"]', process.env.TIME_DEDICATED || "");
 }
 
 async function fillTimesheetForm(
@@ -349,29 +379,12 @@ async function fillTimesheetForm(
   configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
   pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
 ) {
-  const formattedDate = convertDateFormat(dateStr, configFormat, pageFormat);
-  await fillInputWithKeyboard(page, '//input[@type="date"]', formattedDate);
+  await fillDateInput(page, '//input[@type="date"]', dateStr, configFormat);
 
-  await fillInputWithKeyboard(
-    page,
-    '(//input[@type="time"])[1]',
-    formatTime(process.env.CLOCK_IN_SHIFT_1 || "", timeFormat),
-  );
-  await fillInputWithKeyboard(
-    page,
-    '(//input[@type="time"])[2]',
-    formatTime(process.env.CLOCK_OUT_SHIFT_1 || "", timeFormat),
-  );
-  await fillInputWithKeyboard(
-    page,
-    '(//input[@type="time"])[3]',
-    formatTime(process.env.CLOCK_IN_SHIFT_2 || "", timeFormat),
-  );
-  await fillInputWithKeyboard(
-    page,
-    '(//input[@type="time"])[4]',
-    formatTime(process.env.CLOCK_OUT_SHIFT_2 || "", timeFormat),
-  );
+  await fillTimeInput(page, '(//input[@type="time"])[1]', process.env.CLOCK_IN_SHIFT_1 || "");
+  await fillTimeInput(page, '(//input[@type="time"])[2]', process.env.CLOCK_OUT_SHIFT_1 || "");
+  await fillTimeInput(page, '(//input[@type="time"])[3]', process.env.CLOCK_IN_SHIFT_2 || "");
+  await fillTimeInput(page, '(//input[@type="time"])[4]', process.env.CLOCK_OUT_SHIFT_2 || "");
 }
 
 test("fill timesheet for selected working days", async ({ page }) => {
