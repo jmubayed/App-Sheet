@@ -149,6 +149,7 @@ export class DateSelector {
     console.log("  n           - Next month");
     console.log("  p           - Previous month");
     console.log("  range X-Y   - Select weekdays from day X to Y (e.g., 'range 1-15')");
+    console.log("  month       - Select all weekdays in previous month");
     console.log("  week        - Select all weekdays in current week");
     console.log("  pweek       - Select all weekdays in previous week");
     console.log("  clear       - Clear all selections");
@@ -239,6 +240,39 @@ export class DateSelector {
     }
 
     console.log(`\n✓ Added ${added} weekday(s) from day ${startDay} to ${endDay}`);
+  }
+
+  private selectPreviousMonth(): void {
+    const now = new Date();
+    const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const year = prevMonth.getFullYear();
+    const month = prevMonth.getMonth();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+    let added = 0;
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, month, day);
+      if (this.isWeekend(date)) continue;
+
+      const formatted = this.formatDate(date);
+      const exists = this.selectedDates.some(
+        (d) => this.formatDate(d) === formatted
+      );
+
+      if (!exists) {
+        this.selectedDates.push(date);
+        added++;
+      }
+    }
+
+    // Navigate calendar view to the previous month
+    this.currentMonth = new Date(year, month, 1);
+
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December",
+    ];
+    console.log(`\n✓ Added ${added} weekday(s) from ${monthNames[month]} ${year}`);
   }
 
   private selectPreviousWeekdays(): void {
@@ -434,6 +468,9 @@ export class DateSelector {
           } else {
             console.log("\n⚠️  Invalid format. Use: range 1-15");
           }
+          setTimeout(() => resolve(this.prompt()), 1500);
+        } else if (input === "month") {
+          this.selectPreviousMonth();
           setTimeout(() => resolve(this.prompt()), 1500);
         } else if (input === "week") {
           this.selectCurrentWeekdays();

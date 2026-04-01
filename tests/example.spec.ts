@@ -19,16 +19,25 @@ function detectConfigDateFormat(dateStr: string): "DD/MM/YYYY" | "MM/DD/YYYY" {
   const parts = dateStr.split("/").map(Number);
   const [first, second] = parts;
 
+  let format: "DD/MM/YYYY" | "MM/DD/YYYY";
+
   // If first > 12, must be DD/MM/YYYY
   if (first > 12) {
-    return "DD/MM/YYYY";
+    format = "DD/MM/YYYY";
+    console.log(`📋 [CONFIG FORMAT] "${dateStr}" → ${format} (first=${first} > 12)`);
   }
   // If second > 12, must be MM/DD/YYYY
-  if (second > 12) {
-    return "MM/DD/YYYY";
+  else if (second > 12) {
+    format = "MM/DD/YYYY";
+    console.log(`📋 [CONFIG FORMAT] "${dateStr}" → ${format} (second=${second} > 12)`);
   }
   // Ambiguous - default to DD/MM/YYYY (your config uses this)
-  return "DD/MM/YYYY";
+  else {
+    format = "DD/MM/YYYY";
+    console.log(`📋 [CONFIG FORMAT] "${dateStr}" → ${format} (AMBIGUOUS, both ≤ 12, defaulting to DD/MM/YYYY)`);
+  }
+
+  return format;
 }
 
 function convertDateFormat(
@@ -177,66 +186,30 @@ async function detectTimeFormat(
 async function detectDateFormat(
   page: Page,
 ): Promise<"DD/MM/YYYY" | "MM/DD/YYYY"> {
-  // Check date format from table rows
-  const tableRows = page.locator('//span[@data-testid="table-view-row"]');
+  // Use getAllDatesFromVirtualizedTable which scrolls through the whole table
+  const allDates = await getAllDatesFromVirtualizedTable(page);
 
-  // Wait for table rows to be visible
-  try {
-    await tableRows.first().waitFor({ state: "visible", timeout: 5000 });
-  } catch (e) {
-    console.warn("No table rows found, defaulting to MM/DD/YYYY format");
-    return "MM/DD/YYYY";
-  }
+  console.log(`📅 [DATE FORMAT] Analyzing ${allDates.length} dates from table`);
 
-  const count = await tableRows.count();
-
-  if (count > 0) {
-    // Get text content and look for date patterns
-    const rowText = await tableRows.first().textContent();
-
-    // Look for date pattern like XX/XX/XXXX
-    const dateMatch = rowText?.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-
-    if (dateMatch) {
-      const first = parseInt(dateMatch[1]);
-      const second = parseInt(dateMatch[2]);
-
-      // If first number > 12, it must be DD/MM/YYYY
-      if (first > 12) {
-        return "DD/MM/YYYY";
-      }
-      // If second number > 12, it must be MM/DD/YYYY
-      if (second > 12) {
-        return "MM/DD/YYYY";
-      }
-    }
-  }
-
-  // Check date displays
-  const dateCells = page.locator(
-    '//span[@data-testid="date-type-display-span"]',
-  );
-  const dateCount = await dateCells.count();
-
-  if (dateCount > 0) {
-    const dateText = await dateCells.first().textContent();
-    const dateMatch = dateText?.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-
+  for (const dateText of allDates) {
+    const dateMatch = dateText.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
     if (dateMatch) {
       const first = parseInt(dateMatch[1]);
       const second = parseInt(dateMatch[2]);
 
       if (first > 12) {
+        console.log(`📅 [DATE FORMAT] ✅ Detected DD/MM/YYYY — "${dateText}" has first=${first} > 12`);
         return "DD/MM/YYYY";
       }
       if (second > 12) {
+        console.log(`📅 [DATE FORMAT] ✅ Detected MM/DD/YYYY — "${dateText}" has second=${second} > 12`);
         return "MM/DD/YYYY";
       }
     }
   }
 
-  // Default to MM/DD/YYYY (US format)
-  return "MM/DD/YYYY";
+  console.warn(`⚠️ [DATE FORMAT] All dates ambiguous. Defaulting to DD/MM/YYYY`);
+  return "DD/MM/YYYY";
 }
 
 function formatTime(timeStr: string, format: "12" | "24"): string {
@@ -260,6 +233,7 @@ async function fillDateInput(page: Page, selector: string, dateStr: string, conf
   }
 
   const isoDate = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  console.log(`📝 [FILL DATE] "${dateStr}" (configFormat=${configFormat}) → day=${day}, month=${month}, year=${year} → ISO: ${isoDate}`);
   await page.locator(selector).fill(isoDate);
 }
 
@@ -284,13 +258,72 @@ async function openSection(page: Page, sectionName: string) {
   await page.click(`//div[contains(text(),"${sectionName}")]`);
 }
 
+async function getAllDatesFromVirtualizedTable(page: Page): Promise<string[]> {
+  // The table is virtualized — only visible rows are rendered.
+  // We need to scroll through the entire table to collect all dates.
+  const dateSelector = '//div[@data-testonly-column="Date"]//span[@data-testid="date-type-display-span"]';
+
+  try {
+    await page.locator(dateSelector).first().waitFor({ state: "visible", timeout: 5000 });
+  } catch {
+    return [];
+  }
+
+  const allDates = new Set<string>();
+
+  // Read initial visible dates
+  let visibleDates = await page.locator(dateSelector).allTextContents();
+  visibleDates.forEach((d) => allDates.add(d.trim()));
+
+  // Scroll through the virtualized table to load all rows
+  const tableList = page.locator('.TableView__list');
+  let previousSize = 0;
+  let scrollAttempts = 0;
+
+  while (scrollAttempts < 20) {
+    await tableList.evaluate((el) => el.scrollBy(0, 400));
+    await page.waitForTimeout(300);
+
+    visibleDates = await page.locator(dateSelector).allTextContents();
+    visibleDates.forEach((d) => allDates.add(d.trim()));
+
+    if (allDates.size === previousSize) {
+      scrollAttempts++;
+      if (scrollAttempts >= 3) break; // No new dates after 3 scrolls
+    } else {
+      scrollAttempts = 0;
+    }
+    previousSize = allDates.size;
+  }
+
+  // Scroll back to top
+  await tableList.evaluate((el) => el.scrollTo(0, 0));
+  await page.waitForTimeout(300);
+
+  const result = Array.from(allDates);
+  console.log(`📜 [SCROLL] Collected ${result.length} unique dates from virtualized table`);
+  return result;
+}
+
 async function entryExistsForDate(
   page: Page,
   dateStr: string,
   configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
   pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
 ): Promise<boolean> {
-  // Extract day, month, year from config date
+  const existingDates = await getAllDatesFromVirtualizedTable(page);
+  return dateMatchesExisting(dateStr, configFormat, existingDates);
+}
+
+async function getExistingDates(page: Page): Promise<string[]> {
+  return getAllDatesFromVirtualizedTable(page);
+}
+
+function dateMatchesExisting(
+  dateStr: string,
+  configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+  existingDates: string[],
+): boolean {
   const parts = dateStr.split("/").map(Number);
   let day: number, month: number, year: number;
 
@@ -300,22 +333,203 @@ async function entryExistsForDate(
     [month, day, year] = parts;
   }
 
-  const dateCells = page.locator(
-    '//span[@data-testid="date-type-display-span"]',
-  );
-
-  await dateCells.first().waitFor({ state: "visible", timeout: 5000 });
-
-  const existingDates = await dateCells.allTextContents();
-
-  // Check against both possible page formats to handle ambiguous dates
   const asDDMM = normalizeDateForComparison(`${day}/${month}/${year}`);
   const asMMDD = normalizeDateForComparison(`${month}/${day}/${year}`);
 
   return existingDates.some((d) => {
-    const normalized = normalizeDateForComparison(d.trim());
+    const normalized = normalizeDateForComparison(d);
     return normalized === asDDMM || normalized === asMMDD;
   });
+}
+
+async function checkFiledDates(
+  page: Page,
+  sectionName: string,
+  datesToCheck: string[],
+): Promise<void> {
+  if (datesToCheck.length === 0) {
+    console.log(`\n📊 [${sectionName}] No hay fechas para comprobar`);
+    return;
+  }
+
+  await openSection(page, sectionName);
+  await page.waitForTimeout(2000);
+
+  const configFormat = detectConfigDateFormat(datesToCheck[0]);
+  const existingDates = await getExistingDates(page);
+
+  const filed: string[] = [];
+  const pending: string[] = [];
+
+  for (const dateStr of datesToCheck) {
+    if (dateMatchesExisting(dateStr, configFormat, existingDates)) {
+      filed.push(dateStr);
+    } else {
+      pending.push(dateStr);
+    }
+  }
+
+  console.log(`\n${"=".repeat(50)}`);
+  console.log(`📊 [${sectionName}] RESUMEN DE FICHAJES`);
+  console.log(`${"=".repeat(50)}`);
+  console.log(`   Total fechas seleccionadas: ${datesToCheck.length}`);
+  console.log(`   ✅ Ya fichadas: ${filed.length}`);
+  console.log(`   ❌ Pendientes:  ${pending.length}`);
+
+  if (filed.length > 0) {
+    console.log(`\n   ✅ Fichadas:`);
+    filed.forEach((d) => console.log(`      - ${d}`));
+  }
+  if (pending.length > 0) {
+    console.log(`\n   ❌ Pendientes:`);
+    pending.forEach((d) => console.log(`      - ${d}`));
+  }
+  console.log(`${"=".repeat(50)}\n`);
+
+  await page.goto(BASE_URL);
+}
+
+function parseDateToObj(
+  dateStr: string,
+  format: "DD/MM/YYYY" | "MM/DD/YYYY",
+): Date {
+  const parts = dateStr.split("/").map(Number);
+  let day: number, month: number, year: number;
+
+  if (format === "DD/MM/YYYY") {
+    [day, month, year] = parts;
+  } else {
+    [month, day, year] = parts;
+  }
+
+  return new Date(year, month - 1, day);
+}
+
+function formatDateAsConfig(date: Date): string {
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yyyy = date.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+function getDatesInRange(startDate: Date, endDate: Date): string[] {
+  const dates: string[] = [];
+  const current = new Date(startDate);
+
+  while (current <= endDate) {
+    dates.push(formatDateAsConfig(current));
+    current.setDate(current.getDate() + 1);
+  }
+
+  return dates;
+}
+
+async function getAbsenceDates(
+  page: Page,
+  datesToCheck: string[],
+): Promise<string[]> {
+  // Navigate to ABSENCES > List - My Absences
+  await openSection(page, "ABSENCES");
+  await page.waitForTimeout(2000);
+  const listBtn = page.locator('div[role="button"][title="List - My Absences"]');
+  await listBtn.waitFor({ state: "visible", timeout: 10000 });
+  await page.waitForTimeout(500);
+  await listBtn.click();
+  await page.waitForTimeout(3000);
+
+  // Read absence rows — use CSS selectors to scope within each row
+  const rows = page.locator('span[data-testid="table-view-row"]');
+
+  let allAbsenceDays: string[] = [];
+
+  try {
+    await rows.first().waitFor({ state: "visible", timeout: 5000 });
+    const rowCount = await rows.count();
+
+    console.log(`🏥 [ABSENCES] Found ${rowCount} absence rows`);
+
+    // First pass: collect all dates to detect the format
+    const rowData: { startStr: string; endStr: string }[] = [];
+    let absencePageFormat: "DD/MM/YYYY" | "MM/DD/YYYY" | null = null;
+
+    for (let i = 0; i < rowCount; i++) {
+      const row = rows.nth(i);
+      const startCell = row.locator('div[data-testonly-column="Start_Date"] span[data-testid="date-type-display-span"]');
+      const endCell = row.locator('div[data-testonly-column="End_Date"] span[data-testid="date-type-display-span"]');
+
+      if ((await startCell.count()) === 0 || (await endCell.count()) === 0) continue;
+
+      const startStr = (await startCell.first().textContent())?.trim() || "";
+      const endStr = (await endCell.first().textContent())?.trim() || "";
+
+      if (!startStr || !endStr) continue;
+      rowData.push({ startStr, endStr });
+
+      // Try to detect format from any unambiguous date
+      if (!absencePageFormat) {
+        for (const d of [startStr, endStr]) {
+          const parts = d.split("/").map(Number);
+          if (parts[0] > 12) { absencePageFormat = "DD/MM/YYYY"; break; }
+          if (parts[1] > 12) { absencePageFormat = "MM/DD/YYYY"; break; }
+        }
+      }
+    }
+
+    // Default to DD/MM/YYYY if all dates are ambiguous
+    if (!absencePageFormat) absencePageFormat = "DD/MM/YYYY";
+    console.log(`🏥 [ABSENCES] Detected page date format: ${absencePageFormat}`);
+
+    // Second pass: parse dates with the detected format
+    for (let i = 0; i < rowData.length; i++) {
+      const { startStr, endStr } = rowData[i];
+
+      const startDate = parseDateToObj(startStr, absencePageFormat);
+      const endDate = parseDateToObj(endStr, absencePageFormat);
+
+      console.log(`🏥 [ABSENCES] Row ${i}: "${startStr}" → "${endStr}" | Parsed: ${startDate.toISOString().split("T")[0]} → ${endDate.toISOString().split("T")[0]}`);
+
+      const rangeDates = getDatesInRange(startDate, endDate);
+      console.log(`   📅 ${rangeDates.length} day(s) in range`);
+
+      allAbsenceDays = allAbsenceDays.concat(rangeDates);
+    }
+  } catch {
+    console.log(`✅ [ABSENCES] No absences found on page`);
+  }
+
+  console.log(`\n🏥 [ABSENCES] Total absence days collected: ${allAbsenceDays.length}`);
+  if (allAbsenceDays.length > 0) {
+    console.log(`   ${allAbsenceDays.join(", ")}`);
+  }
+
+  // Match against selected dates
+  const configFormat = detectConfigDateFormat(datesToCheck[0]);
+  const matchedAbsences: string[] = [];
+
+  console.log(`\n🏥 [ABSENCES] Comparing against selected dates (configFormat=${configFormat}):`);
+  for (const dateStr of datesToCheck) {
+    const dateObj = parseDateToObj(dateStr, configFormat);
+    const asConfig = formatDateAsConfig(dateObj);
+    const match = allAbsenceDays.includes(asConfig);
+    console.log(`   "${dateStr}" → normalized: "${asConfig}" → ${match ? "MATCH (absence)" : "no match"}`);
+
+    if (match) {
+      matchedAbsences.push(dateStr);
+    }
+  }
+
+  if (matchedAbsences.length > 0) {
+    console.log(`\n${"=".repeat(50)}`);
+    console.log(`🏥 [ABSENCES] AUSENCIAS DETECTADAS`);
+    console.log(`${"=".repeat(50)}`);
+    matchedAbsences.forEach((d) => console.log(`   - ${d}`));
+    console.log(`${"=".repeat(50)}\n`);
+  } else {
+    console.log(`\n✅ [ABSENCES] No hay ausencias en las fechas seleccionadas\n`);
+  }
+
+  await page.goto(BASE_URL);
+  return matchedAbsences;
 }
 
 async function addEntryIfMissing(
@@ -327,7 +541,7 @@ async function addEntryIfMissing(
     configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
     pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
   ) => Promise<void>,
-) {
+): Promise<"added" | "skipped"> {
   await openSection(page, sectionName);
 
   // Wait for table to load properly
@@ -338,22 +552,21 @@ async function addEntryIfMissing(
   const pageFormat = await detectDateFormat(page);
   const configFormat = detectConfigDateFormat(dateStr);
 
-  console.log(
-    `${sectionName} - Detected time format: ${timeFormat}-hour, page date format: ${pageFormat}, config date format: ${configFormat}`,
-  );
-
   if (await entryExistsForDate(page, dateStr, configFormat, pageFormat)) {
-    console.log(`${sectionName} already exists for ${dateStr}`);
+    console.log(`      ⏭️  ${dateStr} ya fichado en ${sectionName} — saltando`);
     await page.goto(BASE_URL);
-    return;
+    return "skipped";
   }
 
+  console.log(`      ✏️  ${dateStr} no encontrado en ${sectionName} — añadiendo...`);
   await page.click('//div[contains(text(),"Add")]');
   await fillForm(timeFormat, configFormat, pageFormat);
   await page.click('//span[contains(text(),"Save")]');
+  console.log(`      ✅ ${dateStr} guardado en ${sectionName}`);
 
   await page.waitForTimeout(1500);
   await page.goto(BASE_URL);
+  return "added";
 }
 
 async function fillTimeAllocationsForm(
@@ -395,11 +608,16 @@ test("fill timesheet for selected working days", async ({ page }) => {
     return;
   }
 
-  console.log("Working days to fill:", workingDays);
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`🚀 INICIO — ${workingDays.length} días seleccionados`);
+  console.log(`${"=".repeat(60)}`);
+  workingDays.forEach((d) => console.log(`   - ${d}`));
 
+  console.log(`\n📌 [PASO 1/5] Navegando a la app...`);
   await page.goto(BASE_URL);
 
   /* -------- LOGIN -------- */
+  console.log(`📌 [PASO 2/5] Login con Google...`);
   await page.click('//button[@id="Google"]');
   await page.fill('input[type="email"]', process.env.EMAIL || "");
   await page.click('button:has-text("Next")');
@@ -408,9 +626,39 @@ test("fill timesheet for selected working days", async ({ page }) => {
 
   await page.pause();
 
+  // Track results for summary
+  const results = {
+    totalSelected: workingDays.length,
+    absences: [] as string[],
+    filteredDays: [] as string[],
+    timeAllocations: { added: [] as string[], skipped: [] as string[] },
+    timesheet: { added: [] as string[], skipped: [] as string[] },
+  };
+
+  /* -------- CHECK ABSENCES -------- */
+  console.log(`\n📌 [PASO 3/6] Comprobando ausencias...`);
+  const absenceDates = await getAbsenceDates(page, workingDays);
+  results.absences = absenceDates;
+  const filteredDays = workingDays.filter((d) => !absenceDates.includes(d));
+  results.filteredDays = filteredDays;
+
+  if (filteredDays.length < workingDays.length) {
+    console.log(`📋 Fichando ${filteredDays.length} de ${workingDays.length} días (${absenceDates.length} ausencia(s) excluidas)`);
+  } else {
+    console.log(`📋 Fichando ${filteredDays.length} días (sin ausencias)`);
+  }
+
+  /* -------- CHECK STATUS -------- */
+  console.log(`\n📌 [PASO 4/6] Comprobando estado actual de fichajes...`);
+  await checkFiledDates(page, "TIMEALLOCATIONS", filteredDays);
+  await checkFiledDates(page, "TIMESHEET", filteredDays);
+
   /* -------- TIMEALLOCATIONS -------- */
-  for (const dateStr of workingDays) {
-    await addEntryIfMissing(
+  console.log(`\n📌 [PASO 5/6] Rellenando TIMEALLOCATIONS...`);
+  for (let i = 0; i < filteredDays.length; i++) {
+    const dateStr = filteredDays[i];
+    console.log(`   ➡️  [${i + 1}/${filteredDays.length}] ${dateStr}`);
+    const result = await addEntryIfMissing(
       page,
       "TIMEALLOCATIONS",
       dateStr,
@@ -423,16 +671,58 @@ test("fill timesheet for selected working days", async ({ page }) => {
           pageFormat,
         ),
     );
+    results.timeAllocations[result === "added" ? "added" : "skipped"].push(dateStr);
   }
+  console.log(`   ✅ TIMEALLOCATIONS completado`);
 
   /* -------- TIMESHEET -------- */
-  for (const dateStr of workingDays) {
-    await addEntryIfMissing(
+  console.log(`\n📌 [PASO 6/6] Rellenando TIMESHEET...`);
+  for (let i = 0; i < filteredDays.length; i++) {
+    const dateStr = filteredDays[i];
+    console.log(`   ➡️  [${i + 1}/${filteredDays.length}] ${dateStr}`);
+    const result = await addEntryIfMissing(
       page,
       "TIMESHEET",
       dateStr,
       (timeFormat, configFormat, pageFormat) =>
         fillTimesheetForm(page, dateStr, timeFormat, configFormat, pageFormat),
     );
+    results.timesheet[result === "added" ? "added" : "skipped"].push(dateStr);
   }
+  console.log(`   ✅ TIMESHEET completado`);
+
+  /* -------- RESUMEN FINAL -------- */
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`📊 RESUMEN FINAL`);
+  console.log(`${"=".repeat(60)}`);
+  console.log(`\n   📅 Días seleccionados:        ${results.totalSelected}`);
+  console.log(`   🏥 Ausencias excluidas:        ${results.absences.length}`);
+  if (results.absences.length > 0) {
+    results.absences.forEach((d) => console.log(`      - ${d}`));
+  }
+  console.log(`   📋 Días a procesar:            ${results.filteredDays.length}`);
+
+  console.log(`\n   ⏱️  TIMEALLOCATIONS:`);
+  console.log(`      ✅ Añadidos:  ${results.timeAllocations.added.length}`);
+  if (results.timeAllocations.added.length > 0) {
+    results.timeAllocations.added.forEach((d) => console.log(`         + ${d}`));
+  }
+  console.log(`      ⏭️  Saltados:  ${results.timeAllocations.skipped.length}`);
+  if (results.timeAllocations.skipped.length > 0) {
+    results.timeAllocations.skipped.forEach((d) => console.log(`         - ${d}`));
+  }
+
+  console.log(`\n   🕐 TIMESHEET:`);
+  console.log(`      ✅ Añadidos:  ${results.timesheet.added.length}`);
+  if (results.timesheet.added.length > 0) {
+    results.timesheet.added.forEach((d) => console.log(`         + ${d}`));
+  }
+  console.log(`      ⏭️  Saltados:  ${results.timesheet.skipped.length}`);
+  if (results.timesheet.skipped.length > 0) {
+    results.timesheet.skipped.forEach((d) => console.log(`         - ${d}`));
+  }
+
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`🎉 FINALIZADO`);
+  console.log(`${"=".repeat(60)}\n`);
 });
