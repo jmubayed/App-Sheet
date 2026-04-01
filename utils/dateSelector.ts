@@ -143,20 +143,17 @@ export class DateSelector {
     }
 
     console.log(`\n${"=".repeat(50)}`);
-    console.log("\nCommands:");
-    console.log("  [number]    - Toggle date selection");
-    console.log("  remove [#]  - Remove specific date from list (e.g., 'remove 1')");
-    console.log("  n           - Next month");
-    console.log("  p           - Previous month");
-    console.log("  range X-Y   - Select weekdays from day X to Y (e.g., 'range 1-15')");
-    console.log("  month       - Select all weekdays in previous month");
-    console.log("  week        - Select all weekdays in current week");
-    console.log("  pweek       - Select all weekdays in previous week");
-    console.log("  clear       - Clear all selections");
-    console.log("  validate    - Check for holidays/weekends in selections");
-    console.log("  location    - Change location for holiday detection");
-    console.log("  done        - Save and exit");
-    console.log("  quit        - Exit without saving");
+    console.log("\nComandos:");
+    console.log("  [número]     - Seleccionar/deseleccionar un día");
+    console.log("  remove [#]   - Quitar fecha de la lista (ej: 'remove 1')");
+    console.log("  n / p        - Mes siguiente / anterior");
+    console.log("  range X-Y    - Seleccionar laborables del día X al Y (ej: 'range 1-15')");
+    console.log("  month        - Seleccionar todos los laborables del mes mostrado");
+    console.log("  week         - Seleccionar laborables de la semana pasada");
+    console.log("  clear        - Borrar toda la selección");
+    console.log("  location     - Cambiar ubicación para festivos");
+    console.log("  done         - Guardar y salir");
+    console.log("  quit         - Salir sin guardar");
     console.log(`${"=".repeat(50)}\n`);
   }
 
@@ -183,36 +180,38 @@ export class DateSelector {
     }
   }
 
-  private selectCurrentWeekdays(): void {
-    const today = new Date();
-    const dayOfWeek = today.getDay();
-    const monday = new Date(today);
+  private askQuestion(question: string): Promise<string> {
+    return new Promise((resolve) => {
+      this.rl.question(question, (answer) => resolve(answer.trim().toLowerCase()));
+    });
+  }
 
-    // Calculate days to subtract to get to Monday
-    const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-    monday.setDate(today.getDate() - diffToMonday);
+  private async addDateWithHolidayCheck(date: Date): Promise<boolean> {
+    const formatted = this.formatDate(date);
+    const exists = this.selectedDates.some(
+      (d) => this.formatDate(d) === formatted
+    );
+    if (exists) return false;
 
-    // Select Mon-Fri of current week
-    for (let i = 0; i < 5; i++) {
-      const date = new Date(monday);
-      date.setDate(monday.getDate() + i);
-
-      const formatted = this.formatDate(date);
-      const exists = this.selectedDates.some(
-        (d) => this.formatDate(d) === formatted
-      );
-
-      if (!exists) {
-        this.selectedDates.push(date);
+    if (this.isHoliday(date)) {
+      const holiday = this.hd!.isHoliday(date);
+      let holidayName = "Holiday";
+      if (Array.isArray(holiday) && holiday.length > 0) {
+        holidayName = holiday[0].name;
+      }
+      const answer = await this.askQuestion(`\n⚠️  ${formatted} is a holiday (${holidayName}). Include? (y/n): `);
+      if (answer !== "y" && answer !== "yes") {
+        console.log(`   Skipped ${formatted}`);
+        return false;
       }
     }
 
-    // Update current month view to show the selected week
-    this.currentMonth = new Date(monday);
-    this.currentMonth.setDate(1);
+    this.selectedDates.push(date);
+    return true;
   }
 
-  private selectRange(startDay: number, endDay: number): void {
+
+  private async selectRange(startDay: number, endDay: number): Promise<void> {
     const year = this.currentMonth.getFullYear();
     const month = this.currentMonth.getMonth();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -225,16 +224,9 @@ export class DateSelector {
     let added = 0;
     for (let day = startDay; day <= endDay; day++) {
       const date = new Date(year, month, day);
-
       if (this.isWeekend(date)) continue;
 
-      const formatted = this.formatDate(date);
-      const exists = this.selectedDates.some(
-        (d) => this.formatDate(d) === formatted
-      );
-
-      if (!exists) {
-        this.selectedDates.push(date);
+      if (await this.addDateWithHolidayCheck(date)) {
         added++;
       }
     }
@@ -242,11 +234,9 @@ export class DateSelector {
     console.log(`\n✓ Added ${added} weekday(s) from day ${startDay} to ${endDay}`);
   }
 
-  private selectPreviousMonth(): void {
-    const now = new Date();
-    const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const year = prevMonth.getFullYear();
-    const month = prevMonth.getMonth();
+  private async selectDisplayedMonth(): Promise<void> {
+    const year = this.currentMonth.getFullYear();
+    const month = this.currentMonth.getMonth();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
 
     let added = 0;
@@ -254,19 +244,10 @@ export class DateSelector {
       const date = new Date(year, month, day);
       if (this.isWeekend(date)) continue;
 
-      const formatted = this.formatDate(date);
-      const exists = this.selectedDates.some(
-        (d) => this.formatDate(d) === formatted
-      );
-
-      if (!exists) {
-        this.selectedDates.push(date);
+      if (await this.addDateWithHolidayCheck(date)) {
         added++;
       }
     }
-
-    // Navigate calendar view to the previous month
-    this.currentMonth = new Date(year, month, 1);
 
     const monthNames = [
       "January", "February", "March", "April", "May", "June",
@@ -275,36 +256,29 @@ export class DateSelector {
     console.log(`\n✓ Added ${added} weekday(s) from ${monthNames[month]} ${year}`);
   }
 
-  private selectPreviousWeekdays(): void {
+  private async selectPreviousWeek(): Promise<void> {
     const today = new Date();
     const dayOfWeek = today.getDay();
     const monday = new Date(today);
 
-    // Calculate days to subtract to get to Monday of current week
     const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-    monday.setDate(today.getDate() - diffToMonday);
+    monday.setDate(today.getDate() - diffToMonday - 7);
 
-    // Go back one week to get Monday of previous week
-    monday.setDate(monday.getDate() - 7);
-
-    // Select Mon-Fri of previous week
+    let added = 0;
     for (let i = 0; i < 5; i++) {
       const date = new Date(monday);
       date.setDate(monday.getDate() + i);
 
-      const formatted = this.formatDate(date);
-      const exists = this.selectedDates.some(
-        (d) => this.formatDate(d) === formatted
-      );
-
-      if (!exists) {
-        this.selectedDates.push(date);
+      if (await this.addDateWithHolidayCheck(date)) {
+        added++;
       }
     }
 
-    // Update current month view to show the selected week
+    // Navegar al mes de esa semana
     this.currentMonth = new Date(monday);
     this.currentMonth.setDate(1);
+
+    console.log(`\n✓ Added ${added} weekday(s) from last week`);
   }
 
   private saveConfig(): void {
@@ -324,56 +298,6 @@ export class DateSelector {
     console.log(`\n✓ Saved ${config.selectedDates.length} date(s) to config/dates.json`);
   }
 
-  private validateSelections(): void {
-    if (this.selectedDates.length === 0) {
-      console.log("\n⚠️  No dates selected.");
-      return;
-    }
-
-    const weekendDates: Date[] = [];
-    const holidayDates: Date[] = [];
-
-    this.selectedDates.forEach((date) => {
-      if (this.isWeekend(date)) {
-        weekendDates.push(date);
-      }
-      if (this.isHoliday(date)) {
-        holidayDates.push(date);
-      }
-    });
-
-    console.log("\n" + "=".repeat(50));
-    console.log("VALIDATION RESULTS");
-    console.log("=".repeat(50));
-
-    if (weekendDates.length === 0 && holidayDates.length === 0) {
-      console.log("\n✓ All selected dates are valid working days!");
-    } else {
-      if (weekendDates.length > 0) {
-        console.log("\n⚠️  Weekend dates found:");
-        weekendDates.forEach((date) => {
-          const dayName = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getDay()];
-          console.log(`  • ${this.formatDate(date)} (${dayName})`);
-        });
-      }
-
-      if (holidayDates.length > 0) {
-        console.log("\n⚠️  Holiday dates found:");
-        holidayDates.forEach((date) => {
-          const holiday = this.hd!.isHoliday(date);
-          let holidayName = "Holiday";
-          if (Array.isArray(holiday) && holiday.length > 0) {
-            holidayName = holiday[0].name;
-          } else if (holiday && typeof holiday === 'object' && 'name' in holiday) {
-            holidayName = (holiday as any).name;
-          }
-          console.log(`  • ${this.formatDate(date)} - ${holidayName}`);
-        });
-      }
-    }
-
-    console.log("=".repeat(50));
-  }
 
   private async changeLocation(): Promise<void> {
     return new Promise((resolve) => {
@@ -436,18 +360,9 @@ export class DateSelector {
             return;
           }
 
-          // Auto-validate before saving
-          this.validateSelections();
-          
-          this.rl.question("\nProceed with saving? (yes/no): ", (confirm) => {
-            if (confirm.trim().toLowerCase() === "yes" || confirm.trim().toLowerCase() === "y") {
-              this.saveConfig();
-              this.rl.close();
-              resolve();
-            } else {
-              setTimeout(() => resolve(this.prompt()), 500);
-            }
-          });
+          this.saveConfig();
+          this.rl.close();
+          resolve();
         } else if (input === "quit") {
           console.log("\nExiting without saving.");
           this.rl.close();
@@ -464,20 +379,15 @@ export class DateSelector {
           if (match) {
             const start = parseInt(match[1]);
             const end = parseInt(match[2]);
-            this.selectRange(start, end);
+            this.selectRange(start, end).then(() => resolve(this.prompt()));
           } else {
             console.log("\n⚠️  Invalid format. Use: range 1-15");
+            setTimeout(() => resolve(this.prompt()), 1500);
           }
-          setTimeout(() => resolve(this.prompt()), 1500);
         } else if (input === "month") {
-          this.selectPreviousMonth();
-          setTimeout(() => resolve(this.prompt()), 1500);
+          this.selectDisplayedMonth().then(() => resolve(this.prompt()));
         } else if (input === "week") {
-          this.selectCurrentWeekdays();
-          resolve(this.prompt());
-        } else if (input === "pweek") {
-          this.selectPreviousWeekdays();
-          resolve(this.prompt());
+          this.selectPreviousWeek().then(() => resolve(this.prompt()));
         } else if (input === "clear") {
           this.selectedDates = [];
           resolve(this.prompt());
@@ -499,9 +409,6 @@ export class DateSelector {
             console.log(`\n⚠️  Invalid number. Please enter a number between 1 and ${this.selectedDates.length}`);
           }
           setTimeout(() => resolve(this.prompt()), 1000);
-        } else if (input === "validate") {
-          this.validateSelections();
-          setTimeout(() => resolve(this.prompt()), 3000);
         } else if (input === "location") {
           this.changeLocation().then(() => resolve(this.prompt()));
         } else {
