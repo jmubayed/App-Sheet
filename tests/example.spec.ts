@@ -15,29 +15,164 @@ function getSelectedWorkingDays(): string[] {
   return dates;
 }
 
-function detectConfigDateFormat(dateStr: string): "DD/MM/YYYY" | "MM/DD/YYYY" {
-  const parts = dateStr.split("/").map(Number);
-  const [first, second] = parts;
+/**
+ * Scan a whole list of dates and count "anchors": dates that can ONLY be read
+ * one way. A component > 12 can only be a day, so it pins the orientation.
+ * Returns how many anchors point to each format plus an example of each.
+ */
+function analyzeDateFormatEvidence(dates: string[]): {
+  ddmm: number;
+  mmdd: number;
+  samples: { ddmm?: string; mmdd?: string };
+} {
+  let ddmm = 0;
+  let mmdd = 0;
+  const samples: { ddmm?: string; mmdd?: string } = {};
 
-  let format: "DD/MM/YYYY" | "MM/DD/YYYY";
+  for (const dateText of dates) {
+    const m = dateText.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (!m) continue;
+    const first = parseInt(m[1]);
+    const second = parseInt(m[2]);
 
-  // If first > 12, must be DD/MM/YYYY
-  if (first > 12) {
-    format = "DD/MM/YYYY";
-    console.log(`📋 [CONFIG FORMAT] "${dateStr}" → ${format} (first=${first} > 12)`);
-  }
-  // If second > 12, must be MM/DD/YYYY
-  else if (second > 12) {
-    format = "MM/DD/YYYY";
-    console.log(`📋 [CONFIG FORMAT] "${dateStr}" → ${format} (second=${second} > 12)`);
-  }
-  // Ambiguous - default to DD/MM/YYYY (your config uses this)
-  else {
-    format = "DD/MM/YYYY";
-    console.log(`📋 [CONFIG FORMAT] "${dateStr}" → ${format} (AMBIGUOUS, both ≤ 12, defaulting to DD/MM/YYYY)`);
+    if (first > 12 && second <= 12) {
+      ddmm++;
+      if (!samples.ddmm) samples.ddmm = dateText;
+    } else if (second > 12 && first <= 12) {
+      mmdd++;
+      if (!samples.mmdd) samples.mmdd = dateText;
+    }
+    // both > 12 is impossible for a real date; both <= 12 is ambiguous → no vote
   }
 
-  return format;
+  return { ddmm, mmdd, samples };
+}
+
+/**
+ * Ask the human, ON SCREEN, which date format applies. Playwright tests run in
+ * a worker with no interactive console, so instead of readline we inject a small
+ * overlay with two buttons into the page the user is already looking at, and wait
+ * for them to click. Returns their choice. Requires a headed run.
+ */
+async function askUserForDateFormat(
+  page: Page,
+  label: string,
+  sampleDates: string[],
+): Promise<"DD/MM/YYYY" | "MM/DD/YYYY"> {
+  const examples = sampleDates.slice(0, 8).join(", ") || "(sin ejemplos)";
+  console.log(
+    `\n❓ [DATE FORMAT] ${label}: formato ambiguo. Elige el formato en la pantalla (botones).`,
+  );
+  console.log(`   Ejemplos: ${examples}`);
+
+  await page.evaluate(
+    ({ label, examples }) => {
+      const prev = document.getElementById("__askDateFormat");
+      if (prev) prev.remove();
+      (window as Window & { __chosenDateFormat?: string | null }).__chosenDateFormat = null;
+
+      const overlay = document.createElement("div");
+      overlay.id = "__askDateFormat";
+      overlay.style.cssText =
+        "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;font-family:sans-serif";
+      overlay.innerHTML =
+        '<div style="background:#fff;padding:24px;border-radius:8px;max-width:440px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.35)">' +
+        '<h3 style="margin:0 0 8px">¿Qué formato de fecha es?</h3>' +
+        '<p style="margin:0 0 4px;color:#555">' +
+        label +
+        "</p>" +
+        '<p style="margin:0 0 16px;color:#888;font-size:13px">Ejemplos: ' +
+        examples +
+        "</p>" +
+        '<button data-fmt="DD/MM/YYYY" style="margin:4px;padding:10px 16px;font-size:15px;cursor:pointer;border:1px solid #5b33fe;background:#5b33fe;color:#fff;border-radius:4px">DD/MM/YYYY (día/mes)</button>' +
+        '<button data-fmt="MM/DD/YYYY" style="margin:4px;padding:10px 16px;font-size:15px;cursor:pointer;border:1px solid #5b33fe;background:#fff;color:#5b33fe;border-radius:4px">MM/DD/YYYY (mes/día)</button>' +
+        "</div>";
+      overlay.querySelectorAll("button").forEach((b) => {
+        (b as HTMLButtonElement).onclick = () => {
+          (window as Window & { __chosenDateFormat?: string | null }).__chosenDateFormat =
+            (b as HTMLElement).getAttribute("data-fmt");
+          overlay.remove();
+        };
+      });
+      document.body.appendChild(overlay);
+    },
+    { label, examples },
+  );
+
+  // Wait indefinitely for the human to click one of the buttons.
+  await page.waitForFunction(
+    () =>
+      (window as Window & { __chosenDateFormat?: string | null })
+        .__chosenDateFormat !== null,
+    null,
+    { timeout: 0 },
+  );
+  const chosen = (await page.evaluate(
+    () =>
+      (window as Window & { __chosenDateFormat?: string | null })
+        .__chosenDateFormat,
+  )) as "DD/MM/YYYY" | "MM/DD/YYYY";
+  console.log(`   ✅ Has elegido: ${chosen}`);
+  return chosen;
+}
+
+/**
+ * Resolve the date format from a list of dates using evidence from ALL of them.
+ * - Contradiction (some dates demand DD/MM, others MM/DD) → throw, don't guess.
+ * - One-sided evidence → that format, with the anchor logged.
+ * - Fully ambiguous (every date has day & month ≤ 12):
+ *     · DATE_FORMAT env var set → use it (manual override, no prompt).
+ *     · a page is available → ASK the user on screen.
+ *     · otherwise → warn loudly and use fallback.
+ */
+async function resolveDateFormat(
+  dates: string[],
+  label: string,
+  page?: Page,
+  fallback: "DD/MM/YYYY" | "MM/DD/YYYY" = "DD/MM/YYYY",
+): Promise<"DD/MM/YYYY" | "MM/DD/YYYY"> {
+  const { ddmm, mmdd, samples } = analyzeDateFormatEvidence(dates);
+
+  if (ddmm > 0 && mmdd > 0) {
+    throw new Error(
+      `[DATE FORMAT] ⛔ ${label}: formato contradictorio — ` +
+        `"${samples.ddmm}" solo puede ser DD/MM pero "${samples.mmdd}" solo puede ser MM/DD. ` +
+        `Datos inconsistentes; abortando para no fichar fechas erróneas.`,
+    );
+  }
+
+  if (ddmm > 0) {
+    console.log(
+      `📅 [DATE FORMAT] ${label}: DD/MM/YYYY (anclado por "${samples.ddmm}", ${ddmm} prueba(s) sobre ${dates.length} fechas)`,
+    );
+    return "DD/MM/YYYY";
+  }
+
+  if (mmdd > 0) {
+    console.log(
+      `📅 [DATE FORMAT] ${label}: MM/DD/YYYY (anclado por "${samples.mmdd}", ${mmdd} prueba(s) sobre ${dates.length} fechas)`,
+    );
+    return "MM/DD/YYYY";
+  }
+
+  // Fully ambiguous — every date has day and month ≤ 12.
+  const override = process.env.DATE_FORMAT?.trim().toUpperCase();
+  if (override === "DD/MM/YYYY" || override === "MM/DD/YYYY") {
+    console.log(
+      `📅 [DATE FORMAT] ${label}: ambiguo → usando DATE_FORMAT=${override} (override por env)`,
+    );
+    return override;
+  }
+
+  if (page) {
+    return askUserForDateFormat(page, label, dates);
+  }
+
+  console.warn(
+    `⚠️ [DATE FORMAT] ${label}: TODAS las fechas son ambiguas (${dates.length} fechas) y no hay pantalla para preguntar. ` +
+      `Usando ${fallback} por defecto. Puedes forzarlo con DATE_FORMAT=DD/MM/YYYY o MM/DD/YYYY.`,
+  );
+  return fallback;
 }
 
 function convertDateFormat(
@@ -188,28 +323,7 @@ async function detectDateFormat(
 ): Promise<"DD/MM/YYYY" | "MM/DD/YYYY"> {
   // Use getAllDatesFromVirtualizedTable which scrolls through the whole table
   const allDates = await getAllDatesFromVirtualizedTable(page);
-
-  console.log(`📅 [DATE FORMAT] Analyzing ${allDates.length} dates from table`);
-
-  for (const dateText of allDates) {
-    const dateMatch = dateText.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (dateMatch) {
-      const first = parseInt(dateMatch[1]);
-      const second = parseInt(dateMatch[2]);
-
-      if (first > 12) {
-        console.log(`📅 [DATE FORMAT] ✅ Detected DD/MM/YYYY — "${dateText}" has first=${first} > 12`);
-        return "DD/MM/YYYY";
-      }
-      if (second > 12) {
-        console.log(`📅 [DATE FORMAT] ✅ Detected MM/DD/YYYY — "${dateText}" has second=${second} > 12`);
-        return "MM/DD/YYYY";
-      }
-    }
-  }
-
-  console.warn(`⚠️ [DATE FORMAT] All dates ambiguous. Defaulting to DD/MM/YYYY`);
-  return "DD/MM/YYYY";
+  return resolveDateFormat(allDates, "TABLA", page);
 }
 
 function formatTime(timeStr: string, format: "12" | "24"): string {
@@ -312,7 +426,7 @@ async function entryExistsForDate(
   pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
 ): Promise<boolean> {
   const existingDates = await getAllDatesFromVirtualizedTable(page);
-  return dateMatchesExisting(dateStr, configFormat, existingDates);
+  return dateMatchesExisting(dateStr, configFormat, pageFormat, existingDates);
 }
 
 async function getExistingDates(page: Page): Promise<string[]> {
@@ -322,6 +436,7 @@ async function getExistingDates(page: Page): Promise<string[]> {
 function dateMatchesExisting(
   dateStr: string,
   configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
+  pageFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
   existingDates: string[],
 ): boolean {
   const parts = dateStr.split("/").map(Number);
@@ -333,13 +448,17 @@ function dateMatchesExisting(
     [month, day, year] = parts;
   }
 
-  const asDDMM = normalizeDateForComparison(`${day}/${month}/${year}`);
-  const asMMDD = normalizeDateForComparison(`${month}/${day}/${year}`);
+  // Compare ONLY in the table's actual orientation (pageFormat).
+  // Comparing both orders caused false positives: e.g. 5/6 (Jun 5) wrongly
+  // matched 6/5 (May 6), since the swapped form equals an unrelated real date.
+  const target =
+    pageFormat === "DD/MM/YYYY"
+      ? normalizeDateForComparison(`${day}/${month}/${year}`)
+      : normalizeDateForComparison(`${month}/${day}/${year}`);
 
-  return existingDates.some((d) => {
-    const normalized = normalizeDateForComparison(d);
-    return normalized === asDDMM || normalized === asMMDD;
-  });
+  return existingDates.some(
+    (d) => normalizeDateForComparison(d) === target,
+  );
 }
 
 async function checkFiledDates(
@@ -355,14 +474,15 @@ async function checkFiledDates(
   await openSection(page, sectionName);
   await page.waitForTimeout(2000);
 
-  const configFormat = detectConfigDateFormat(datesToCheck[0]);
+  const configFormat = await resolveDateFormat(datesToCheck, "CONFIG", page);
+  const pageFormat = await detectDateFormat(page);
   const existingDates = await getExistingDates(page);
 
   const filed: string[] = [];
   const pending: string[] = [];
 
   for (const dateStr of datesToCheck) {
-    if (dateMatchesExisting(dateStr, configFormat, existingDates)) {
+    if (dateMatchesExisting(dateStr, configFormat, pageFormat, existingDates)) {
       filed.push(dateStr);
     } else {
       pending.push(dateStr);
@@ -503,7 +623,7 @@ async function getAbsenceDates(
   }
 
   // Match against selected dates
-  const configFormat = detectConfigDateFormat(datesToCheck[0]);
+  const configFormat = await resolveDateFormat(datesToCheck, "CONFIG", page);
   const matchedAbsences: string[] = [];
 
   console.log(`\n🏥 [ABSENCES] Comparing against selected dates (configFormat=${configFormat}):`);
@@ -536,6 +656,7 @@ async function addEntryIfMissing(
   page: Page,
   sectionName: string,
   dateStr: string,
+  configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
   fillForm: (
     timeFormat: "12" | "24",
     configFormat: "DD/MM/YYYY" | "MM/DD/YYYY",
@@ -547,10 +668,15 @@ async function addEntryIfMissing(
   // Wait for table to load properly
   await page.waitForTimeout(2000);
 
-  // Detect formats after opening the section
+  // Detect formats after opening the section.
+  // configFormat is resolved once from the whole config list and passed in;
+  // pageFormat is read from the table here. We log both so a mismatch is visible.
   const timeFormat = await detectTimeFormat(page, sectionName);
   const pageFormat = await detectDateFormat(page);
-  const configFormat = detectConfigDateFormat(dateStr);
+  console.log(
+    `      🔎 [${sectionName}] Formatos → config=${configFormat}, tabla=${pageFormat}` +
+      (configFormat !== pageFormat ? " (distintos: se convierte)" : ""),
+  );
 
   if (await entryExistsForDate(page, dateStr, configFormat, pageFormat)) {
     console.log(`      ⏭️  ${dateStr} ya fichado en ${sectionName} — saltando`);
@@ -619,10 +745,10 @@ test("fill timesheet for selected working days", async ({ page }) => {
   /* -------- LOGIN -------- */
   console.log(`📌 [PASO 2/5] Login con Google...`);
   await page.click('//button[@id="Google"]');
-  await page.fill('input[type="email"]', process.env.EMAIL || "");
-  await page.click('button:has-text("Next")');
+  await page.fill('#identifierId', process.env.EMAIL || "");
+  await page.click('#identifierNext');
   await page.fill('input[type="password"]', process.env.PASSWORD || "");
-  await page.click('button:has-text("Next")');
+  await page.click('#passwordNext');
 
   await page.pause();
 
@@ -653,6 +779,10 @@ test("fill timesheet for selected working days", async ({ page }) => {
   await checkFiledDates(page, "TIMEALLOCATIONS", filteredDays);
   await checkFiledDates(page, "TIMESHEET", filteredDays);
 
+  // Resolve the config date format ONCE from all selected days (any day > 12
+  // anchors it). If still ambiguous, asks on screen. Throws on contradictions.
+  const configFormat = await resolveDateFormat(filteredDays, "CONFIG", page);
+
   /* -------- TIMEALLOCATIONS -------- */
   console.log(`\n📌 [PASO 5/6] Rellenando TIMEALLOCATIONS...`);
   for (let i = 0; i < filteredDays.length; i++) {
@@ -662,6 +792,7 @@ test("fill timesheet for selected working days", async ({ page }) => {
       page,
       "TIMEALLOCATIONS",
       dateStr,
+      configFormat,
       (timeFormat, configFormat, pageFormat) =>
         fillTimeAllocationsForm(
           page,
@@ -684,6 +815,7 @@ test("fill timesheet for selected working days", async ({ page }) => {
       page,
       "TIMESHEET",
       dateStr,
+      configFormat,
       (timeFormat, configFormat, pageFormat) =>
         fillTimesheetForm(page, dateStr, timeFormat, configFormat, pageFormat),
     );
