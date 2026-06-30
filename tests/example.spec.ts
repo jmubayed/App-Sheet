@@ -619,7 +619,7 @@ test("fill timesheet for selected working days", async ({ page }) => {
   /* -------- LOGIN -------- */
   console.log(`📌 [PASO 2/5] Login con Google...`);
   await page.click('//button[@id="Google"]');
-  await page.fill('input[type="email"]', process.env.EMAIL || "");
+  await page.fill('input[type="text"]', process.env.EMAIL || "");
   await page.click('button:has-text("Next")');
   await page.fill('input[type="password"]', process.env.PASSWORD || "");
   await page.click('button:has-text("Next")');
